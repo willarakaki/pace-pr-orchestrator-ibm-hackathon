@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Any
 
-import agentops
+
 import aiohttp
 import aiohttp.web as _web
 
@@ -100,7 +100,7 @@ async def check_granite_guardian(payload: dict) -> None:
         pr_number,
     )
 
-agentops.init(os.environ.get("AGENTOPS_API_KEY", ""))
+
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -110,7 +110,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_PRS = int(os.environ.get("MAX_CONCURRENT_PRS", "3"))
-_pr_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PRS)
+_pr_semaphore = None
 _SEMAPHORE_TIMEOUT = float(os.environ.get("PR_QUEUE_TIMEOUT", "10"))
 SERVER_HOST = os.environ.get("HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("PORT", "8000"))
@@ -233,6 +233,10 @@ async def github_webhook(request: Request):
 
     logger.info("Received PR webhook: PR #%s -- %s", parsed_pr["id"], parsed_pr["title"])
 
+    global _pr_semaphore
+    if _pr_semaphore is None:
+        _pr_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PRS)
+
     try:
         await asyncio.wait_for(_pr_semaphore.acquire(), timeout=_SEMAPHORE_TIMEOUT)
     except asyncio.TimeoutError:
@@ -262,6 +266,7 @@ async def github_webhook(request: Request):
             )
         else:
             await post_github_comment(repo_name, parsed_pr["id"], review_result["markdown_report"])
+
 
     return JSONResponse(review_result, status_code=200)
 

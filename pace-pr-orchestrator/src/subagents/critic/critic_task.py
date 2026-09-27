@@ -58,17 +58,17 @@ def _render_markdown(critic_result: dict, pr_id) -> str:
     # ── Approved findings table ──────────────────────────────────────────────
     if approved:
         rows = "\n".join(
-            "| {source} | {sev_icon} `{sev}` | {detail} |".format(
-                source=_SOURCE_LABEL.get(f.get("source", ""), f.get("source", "")),
-                sev_icon=_SEVERITY_ICON.get(f.get("severity", "").lower(), "❓"),
-                sev=f.get("severity", "unknown"),
-                detail=f.get("detail", ""),
+            "| `{file}` | {line} | {conf:.0f}% | {desc} |".format(
+                file=f.get("file_reference", "unknown"),
+                line=f.get("line_number", 0),
+                conf=f.get("confidence_score", 0.0) * 100,
+                desc=f.get("description", ""),
             )
             for f in approved
         )
         findings_section = (
-            "| Agent | Severity | Finding |\n"
-            "|---|---|---|\n"
+            "| File | Line | Confidence | Finding |\n"
+            "|---|---|---|---|\n"
             + rows
         )
     else:

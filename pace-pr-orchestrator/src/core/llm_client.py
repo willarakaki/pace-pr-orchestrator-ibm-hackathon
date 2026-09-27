@@ -23,6 +23,8 @@ import re
 from typing import Any, Type, TypeVar, cast, overload
 import os
 
+import aiohttp
+
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -105,6 +107,27 @@ def _log_retry(retry_state) -> None:
     )
 
 
+# ── IBM IAM token exchange ────────────────────────────────────────────────────
+
+async def _get_ibm_iam_token(api_key: str) -> str:
+    """
+    Exchange an IBM Cloud API key for a short-lived IAM access token.
+
+    POSTs to https://iam.cloud.ibm.com/identity/token and returns the
+    ``access_token`` string from the JSON response.
+    """
+    url = "https://iam.cloud.ibm.com/identity/token"
+    data = {
+        "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+        "apikey": api_key,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, data=data) as resp:
+            resp.raise_for_status()
+            payload = await resp.json()
+    return payload["access_token"]
+
+
 # ── Core single-provider request ─────────────────────────────────────────────
 
 async def _do_request(
@@ -113,43 +136,36 @@ async def _do_request(
     api_key: str,
     project_id: str,
 ) -> str:
-    """
-    Call Watsonx via Langchain using `ainvoke`.
-    """
-    # Map messages to LangChain compatible tuples
-    lc_messages = []
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "system":
-            lc_messages.append(("system", content))
-        elif role in ("user", "human"):
-            lc_messages.append(("human", content))
-        elif role in ("assistant", "ai"):
-            lc_messages.append(("ai", content))
-        else:
-            lc_messages.append((role, content))
-            
-    parameters = TextChatParameters()
-
-    # Pass configuration explicitly so it's not depending strictly on environment
-    from pydantic import SecretStr
+    payload = {
+        "model": LLM_MODEL,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 4000
+    }
     
-    model = ChatWatsonx(
-        model_id=LLM_MODEL,
-        url=SecretStr(api_url),
-        project_id=project_id,
-        apikey=SecretStr(api_key),
-        params=parameters,
-    )
-
-    response = await asyncio.wait_for(
-        model.ainvoke(lc_messages),
-        timeout=LLM_TIMEOUT_SECONDS
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
     
-    # Langchain AIMessage's content can be str or list, ensure it's returned as str
-    return str(response.content)
+    if "cloud.ibm.com" in api_url:
+        iam_token = await _get_ibm_iam_token(api_key)
+        headers["Authorization"] = f"Bearer {iam_token}"
+        if project_id:
+            payload["project_id"] = project_id
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            api_url, 
+            json=payload, 
+            headers=headers, 
+            timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT_SECONDS)
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
 
 
 # ── Tenacity-wrapped primary call ─────────────────────────────────────────────

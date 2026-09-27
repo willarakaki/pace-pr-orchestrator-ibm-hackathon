@@ -42,8 +42,9 @@ WATSONX_URL: str = _require("WATSONX_URL")
 # API key for Watsonx.
 WATSONX_APIKEY: str = _require("WATSONX_APIKEY")
 
-# Project ID for Watsonx.
-WATSONX_PROJECT_ID: str = _require("WATSONX_PROJECT_ID")
+# Project ID for Watsonx (required for IBM Watsonx endpoints, leave empty for
+# standard OpenAI-compatible endpoints that do not require it).
+WATSONX_PROJECT_ID: str = _optional("WATSONX_PROJECT_ID", "")
 
 # Model identifier forwarded in the chat-completion payload.
 LLM_MODEL: str = _optional("LLM_MODEL", "ibm/granite-3-8b-instruct")
