@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "vera-ai-dev-tools": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${workspaceFolder}"],
+      "disabled": false
+    },
+    "vera-ai-shell": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@wonderwhy-er/desktop-commander"
+      ],
+      "alwaysAllow": [
+        "execute_command"
+      ],
+      "timeout": 30000,
+      "disabled": false
+    }
+  }
+}
