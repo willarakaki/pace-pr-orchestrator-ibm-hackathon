@@ -36,14 +36,17 @@ def _optional(name: str, default: str = "") -> str:
 
 # ── Public constants ───────────────────────────────────────────────────────────
 
-# URL of the LLM inference endpoint (OpenAI-compatible chat completions).
-LLM_API_URL: str = _require("LLM_API_URL")
+# URL of the Watsonx endpoint.
+WATSONX_URL: str = _require("WATSONX_URL")
 
-# Bearer token for the LLM API (optional — some self-hosted endpoints skip auth).
-LLM_API_KEY: str = _optional("LLM_API_KEY")
+# API key for Watsonx.
+WATSONX_APIKEY: str = _require("WATSONX_APIKEY")
+
+# Project ID for Watsonx.
+WATSONX_PROJECT_ID: str = _require("WATSONX_PROJECT_ID")
 
 # Model identifier forwarded in the chat-completion payload.
-LLM_MODEL: str = _optional("LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL: str = _optional("LLM_MODEL", "ibm/granite-3-8b-instruct")
 
 # ── Fallback (secondary) LLM provider ────────────────────────────────────────
 # When set, llm_client will automatically failover to this endpoint after the
@@ -55,6 +58,9 @@ LLM_FALLBACK_API_URL: str = _optional("LLM_FALLBACK_API_URL")
 
 # Bearer token for the fallback LLM API (optional).
 LLM_FALLBACK_API_KEY: str = _optional("LLM_FALLBACK_API_KEY")
+
+# Project ID for the fallback LLM API (optional).
+LLM_FALLBACK_PROJECT_ID: str = _optional("LLM_FALLBACK_PROJECT_ID")
 
 # Personal access token used to post PR review comments on GitHub.
 GITHUB_TOKEN: str = _optional("GITHUB_TOKEN")

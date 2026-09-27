@@ -31,8 +31,9 @@ def _reload_config(env_overrides: dict) -> object:
 
     # Patch only the env vars relevant to config.py.
     CONTROLLED_KEYS = {
-        "LLM_API_URL",
-        "LLM_API_KEY",
+        "WATSONX_URL",
+        "WATSONX_APIKEY",
+        "WATSONX_PROJECT_ID",
         "GITHUB_TOKEN",
         "LLM_TIMEOUT_SECONDS",
         "LLM_MAX_RETRIES",
@@ -61,26 +62,26 @@ def _reload_config(env_overrides: dict) -> object:
 class TestRequiredVariable:
     """_require() must raise RuntimeError for missing or blank variables."""
 
-    def test_missing_llm_api_url_raises(self):
-        """Startup must fail fast when LLM_API_URL is absent."""
-        with pytest.raises(RuntimeError, match="LLM_API_URL"):
-            _reload_config({})  # no LLM_API_URL set
+    def test_missing_watsonx_url_raises(self):
+        """Startup must fail fast when WATSONX_URL is absent."""
+        with pytest.raises(RuntimeError, match="WATSONX_URL"):
+            _reload_config({"WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})  # no WATSONX_URL set
 
-    def test_empty_llm_api_url_raises(self):
+    def test_empty_watsonx_url_raises(self):
         """A variable set to whitespace must be treated as absent."""
-        with pytest.raises(RuntimeError, match="LLM_API_URL"):
-            _reload_config({"LLM_API_URL": "   "})
+        with pytest.raises(RuntimeError, match="WATSONX_URL"):
+            _reload_config({"WATSONX_URL": "   ", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
 
-    def test_valid_llm_api_url_accepted(self):
-        """A non-empty LLM_API_URL must be loaded without error."""
-        cfg = _reload_config({"LLM_API_URL": "https://api.openai.com/v1"})
-        assert cfg.LLM_API_URL == "https://api.openai.com/v1"
+    def test_valid_watsonx_url_accepted(self):
+        """A non-empty WATSONX_URL must be loaded without error."""
+        cfg = _reload_config({"WATSONX_URL": "https://us-south.ml.cloud.ibm.com", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
+        assert cfg.WATSONX_URL == "https://us-south.ml.cloud.ibm.com"
 
     def test_error_message_includes_variable_name(self):
         """RuntimeError message should name the missing variable for DX."""
         with pytest.raises(RuntimeError) as exc_info:
             _reload_config({})
-        assert "LLM_API_URL" in str(exc_info.value)
+        assert "WATSONX_URL" in str(exc_info.value)
         assert "not set" in str(exc_info.value)
 
 
@@ -89,31 +90,27 @@ class TestRequiredVariable:
 class TestOptionalVariables:
     """_optional() must fall back gracefully when variables are unset."""
 
-    def test_llm_api_key_defaults_to_empty_string(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com"})
-        assert cfg.LLM_API_KEY == ""
-
     def test_github_token_defaults_to_empty_string(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com"})
+        cfg = _reload_config({"WATSONX_URL": "url", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
         assert cfg.GITHUB_TOKEN == ""
 
     def test_llm_timeout_defaults_to_100(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com"})
+        cfg = _reload_config({"WATSONX_URL": "url", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
         assert cfg.LLM_TIMEOUT_SECONDS == 100.0
 
     def test_llm_max_retries_defaults_to_2(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com"})
+        cfg = _reload_config({"WATSONX_URL": "url", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
         assert cfg.LLM_MAX_RETRIES == 2
 
     def test_optional_values_respect_env_override(self):
         cfg = _reload_config({
-            "LLM_API_URL": "https://example.com",
-            "LLM_API_KEY": "my-secret-key",
+            "WATSONX_URL": "url",
+            "WATSONX_APIKEY": "key",
+            "WATSONX_PROJECT_ID": "id",
             "GITHUB_TOKEN": "ghp_abc123",
             "LLM_TIMEOUT_SECONDS": "42",
             "LLM_MAX_RETRIES": "7",
         })
-        assert cfg.LLM_API_KEY == "my-secret-key"
         assert cfg.GITHUB_TOKEN == "ghp_abc123"
         assert cfg.LLM_TIMEOUT_SECONDS == 42.0
         assert cfg.LLM_MAX_RETRIES == 7
@@ -125,13 +122,13 @@ class TestTypesAndWhitespaceTrimming:
     """Constants must be the right Python types and leading/trailing spaces stripped."""
 
     def test_timeout_is_float(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com", "LLM_TIMEOUT_SECONDS": "55"})
+        cfg = _reload_config({"WATSONX_URL": "url", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id", "LLM_TIMEOUT_SECONDS": "55"})
         assert isinstance(cfg.LLM_TIMEOUT_SECONDS, float)
 
     def test_max_retries_is_int(self):
-        cfg = _reload_config({"LLM_API_URL": "https://example.com", "LLM_MAX_RETRIES": "2"})
+        cfg = _reload_config({"WATSONX_URL": "url", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id", "LLM_MAX_RETRIES": "2"})
         assert isinstance(cfg.LLM_MAX_RETRIES, int)
 
-    def test_llm_api_url_is_stripped(self):
-        cfg = _reload_config({"LLM_API_URL": "  https://trimmed.example.com  "})
-        assert cfg.LLM_API_URL == "https://trimmed.example.com"
+    def test_watsonx_url_is_stripped(self):
+        cfg = _reload_config({"WATSONX_URL": "  https://trimmed.example.com  ", "WATSONX_APIKEY": "key", "WATSONX_PROJECT_ID": "id"})
+        assert cfg.WATSONX_URL == "https://trimmed.example.com"

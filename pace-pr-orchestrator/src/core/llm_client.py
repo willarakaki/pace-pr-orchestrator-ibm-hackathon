@@ -6,15 +6,14 @@ sessions and retry logic.  This centralises:
 
   - Authentication headers (sourced from src.core.config)
   - Retry-with-backoff for transient 5xx / network errors (via tenacity)
-  - OpenAI-style chat-completion envelope unwrapping
   - Pydantic output firewall: strips Markdown fences, JSON-parses, and
     validates the LLM string against the caller-supplied ``response_model``.
     A ``ValueError`` from validation triggers a tenacity retry so that
     hallucinated or prompt-injected payloads are automatically regenerated.
   - High-availability failover: if the primary provider exhausts all retries
-    (or returns an unrecoverable 503/429), the client switches to the
+    (or returns an unrecoverable error), the client switches to the
     fallback credentials and re-attempts the generation once more.
-  - A single shared aiohttp.ClientSession (created lazily, reused per process)
+  - Integration with IBM WatsonX via langchain-ibm.
 """
 
 import asyncio
@@ -22,16 +21,21 @@ import json
 import logging
 import re
 from typing import Any, Type, TypeVar, cast, overload
+import os
 
-import aiohttp
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from langchain_ibm import ChatWatsonx
+from ibm_watsonx_ai.foundation_models.schema import TextChatParameters
+
 from src.core.config import (
-    LLM_API_KEY,
-    LLM_API_URL,
+    WATSONX_APIKEY,
+    WATSONX_PROJECT_ID,
+    WATSONX_URL,
     LLM_FALLBACK_API_KEY,
     LLM_FALLBACK_API_URL,
+    LLM_FALLBACK_PROJECT_ID,
     LLM_MAX_RETRIES,
     LLM_MODEL,
     LLM_TIMEOUT_SECONDS,
@@ -41,27 +45,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-# ── Shared session (lazy singleton) ──────────────────────────────────────────
-_session: aiohttp.ClientSession | None = None
-
-
-def _get_session() -> aiohttp.ClientSession:
-    """Return the process-wide aiohttp session, creating it on first call."""
-    global _session
-    if _session is None or _session.closed:
-        _session = aiohttp.ClientSession()
-    return _session
-
-
-# ── Header / credential helpers ───────────────────────────────────────────────
-
-def _build_headers(api_key: str) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
-
-
 # ── Pydantic output firewall ──────────────────────────────────────────────────
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
@@ -70,17 +53,9 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 def _extract_json_str(text: str) -> str:
     """
     Strip Markdown code fences from *text* and return the inner JSON string.
-
-    Handles the common LLM habit of wrapping JSON in triple-backtick fences,
-    e.g.::
-
-        ```json
-        {"status": "pass", ...}
-        ```
-
-    If no fence is found the original text is returned unchanged so that
-    clean JSON responses still parse correctly.
     """
+    if not isinstance(text, str):
+        text = str(text)
     match = _FENCE_RE.search(text)
     return match.group(1) if match else text.strip()
 
@@ -88,12 +63,6 @@ def _extract_json_str(text: str) -> str:
 def _parse_and_validate(raw_text: str, response_model: Type[T]) -> T:
     """
     Parse *raw_text* as JSON and validate it through *response_model*.
-
-    Raises:
-        ValueError: When JSON cannot be decoded or Pydantic validation fails.
-            Both error paths raise ``ValueError`` so that tenacity's
-            ``retry_if_exception(ValueError)`` treats them as retryable faults,
-            triggering a fresh LLM generation attempt.
     """
     cleaned = _extract_json_str(raw_text)
     try:
@@ -109,42 +78,20 @@ def _parse_and_validate(raw_text: str, response_model: Type[T]) -> T:
         ) from exc
 
 
-# ── HTTP response unwrapping ──────────────────────────────────────────────────
-
-def _unwrap_content(raw: dict) -> str:
-    """
-    Extract the assistant message content string from an OpenAI-compatible
-    chat-completion envelope, or serialise raw dicts for direct-JSON endpoints.
-    """
-    if "choices" in raw:
-        return raw["choices"][0]["message"]["content"]
-    # Direct-JSON endpoint: serialise back to string so the firewall can parse it.
-    return json.dumps(raw)
-
-
 # ── Retry predicate ───────────────────────────────────────────────────────────
 
 def _is_retryable(exc: BaseException) -> bool:
     """
     Return True for transient errors that warrant a retry.
-
-    Retryable:
-    - ``asyncio.TimeoutError`` — request timed out.
-    - ``aiohttp.ClientResponseError`` with status >= 500 — server-side fault.
-    - Any other ``aiohttp.ClientError`` — connection/DNS/protocol error.
-    - ``ValueError`` — Pydantic firewall rejected the LLM output (hallucination
-      or prompt-injection attempt); a fresh generation may succeed.
-
-    Not retryable:
-    - ``aiohttp.ClientResponseError`` with status in 4xx (except 429) — caller
-      bug or invalid input; retrying would not help.
     """
     if isinstance(exc, (asyncio.TimeoutError, ValueError)):
         return True
-    if isinstance(exc, aiohttp.ClientResponseError):
-        return exc.status == 429 or exc.status >= 500
-    if isinstance(exc, aiohttp.ClientError):
+    
+    # Simple check for HTTP 429 and 5xx errors from underlying layers
+    exc_str = str(exc)
+    if "429" in exc_str or "500" in exc_str or "502" in exc_str or "503" in exc_str or "504" in exc_str:
         return True
+        
     return False
 
 
@@ -164,42 +111,48 @@ async def _do_request(
     messages: list[dict],
     api_url: str,
     api_key: str,
+    project_id: str,
 ) -> str:
     """
-    POST *messages* to *api_url* with *api_key* and return the raw content string.
-
-    Raises aiohttp errors directly — callers are responsible for retry logic.
+    Call Watsonx via Langchain using `ainvoke`.
     """
-    payload: dict[str, Any] = {"model": LLM_MODEL, "messages": messages}
-    timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT_SECONDS)
-    headers = _build_headers(api_key)
+    # Map messages to LangChain compatible tuples
+    lc_messages = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            lc_messages.append(("system", content))
+        elif role in ("user", "human"):
+            lc_messages.append(("human", content))
+        elif role in ("assistant", "ai"):
+            lc_messages.append(("ai", content))
+        else:
+            lc_messages.append((role, content))
+            
+    parameters = TextChatParameters()
 
-    session = _get_session()
-    async with session.post(
-        api_url,
-        json=payload,
-        headers=headers,
-        timeout=timeout,
-    ) as response:
-        response.raise_for_status()
-        raw = await response.json()
+    # Pass configuration explicitly so it's not depending strictly on environment
+    from pydantic import SecretStr
+    
+    model = ChatWatsonx(
+        model_id=LLM_MODEL,
+        url=SecretStr(api_url),
+        project_id=project_id,
+        apikey=SecretStr(api_key),
+        params=parameters,
+    )
 
-    return _unwrap_content(raw)
+    response = await asyncio.wait_for(
+        model.ainvoke(lc_messages),
+        timeout=LLM_TIMEOUT_SECONDS
+    )
+    
+    # Langchain AIMessage's content can be str or list, ensure it's returned as str
+    return str(response.content)
 
 
 # ── Tenacity-wrapped primary call ─────────────────────────────────────────────
-
-# ── Tenacity-wrapped primary call ─────────────────────────────────────────────
-#
-# The Pydantic validation step is intentionally performed INSIDE _primary_call
-# so that a ValueError raised by _parse_and_validate is visible to Tenacity's
-# retry predicate and triggers a fresh LLM generation attempt.  If validation
-# were done in the outer llm_chat wrapper it would escape the @retry boundary
-# and never be retried.
-#
-# _primary_call therefore needs to know which response_model to validate
-# against.  We use a closure factory (_make_primary_call) rather than a
-# module-level decorated function so that each call site binds its own model.
 
 def _make_primary_call(response_model: "Type[T] | None"):
     """
@@ -207,7 +160,6 @@ def _make_primary_call(response_model: "Type[T] | None"):
     when *response_model* is provided, validates the response inside the retry
     boundary so that Pydantic ``ValueError``s trigger a retry.
     """
-
     @retry(
         retry=retry_if_exception(_is_retryable),
         wait=wait_exponential(multiplier=1, min=1, max=60),
@@ -216,9 +168,10 @@ def _make_primary_call(response_model: "Type[T] | None"):
         reraise=True,
     )
     async def _primary_call(messages: list[dict]):
-        raw_content = await _do_request(messages, LLM_API_URL, LLM_API_KEY)
+        raw_content = await _do_request(
+            messages, WATSONX_URL, WATSONX_APIKEY, WATSONX_PROJECT_ID
+        )
         if response_model is not None:
-            # Raises ValueError on bad JSON or schema mismatch — caught by @retry.
             return _parse_and_validate(raw_content, response_model)
         return raw_content
 
@@ -238,42 +191,15 @@ async def llm_chat(
     response_model: Type[T] | None = None,
 ) -> T | str:
     """
-    Send a chat-completion request to the configured LLM endpoint, validate the
+    Send a chat-completion request to WatsonX, validate the
     response through an optional Pydantic firewall, and return the result.
-
-    Two-tier high-availability pattern
-    -----------------------------------
-    1. The primary provider is called up to ``LLM_MAX_RETRIES`` times (with
-       exponential back-off) for any transient or firewall failure.  Pydantic
-       validation is performed **inside** the retried function so that a
-       ``ValueError`` from a malformed/hallucinated LLM response is caught by
-       Tenacity and triggers a fresh generation attempt.
-    2. If the primary exhausts its budget *and* ``LLM_FALLBACK_API_URL`` is
-       configured, one further attempt is made against the fallback provider.
-       The fallback attempt also goes through the Pydantic firewall.
-    3. If the fallback itself fails, the exception propagates to the caller.
-
-    Args:
-        messages:       List of ``{"role": …, "content": …}`` dicts.
-        response_model: Optional Pydantic ``BaseModel`` subclass.  When
-                        supplied, the raw LLM string is stripped of Markdown
-                        fences, JSON-parsed, and validated.  A ``ValueError``
-                        from validation causes tenacity to retry the generation.
-                        When ``None``, raw ``dict`` is returned (legacy mode).
-
-    Returns:
-        An instance of *response_model* when provided, otherwise a plain dict.
-
-    Raises:
-        Exception: After all primary retries are exhausted and either no
-                   fallback is configured or the fallback also fails.
     """
     _primary_call = _make_primary_call(response_model)
 
     try:
         result = await _primary_call(messages)
     except Exception as primary_exc:
-        if not LLM_FALLBACK_API_URL:
+        if not LLM_FALLBACK_API_URL or not LLM_FALLBACK_API_KEY or not LLM_FALLBACK_PROJECT_ID:
             raise
 
         logger.warning(
@@ -282,13 +208,16 @@ async def llm_chat(
             primary_exc,
             LLM_FALLBACK_API_URL,
         )
-        # One attempt on the fallback — errors propagate to the caller.
-        raw_content = await _do_request(messages, LLM_FALLBACK_API_URL, LLM_FALLBACK_API_KEY)
+        raw_content = await _do_request(
+            messages,
+            LLM_FALLBACK_API_URL,
+            LLM_FALLBACK_API_KEY,
+            LLM_FALLBACK_PROJECT_ID
+        )
         if response_model is not None:
             return cast(T, _parse_and_validate(raw_content, response_model))
         return raw_content
     else:
         if response_model is None:
-            # result is a raw string; return it directly.
             return cast(str, result)
         return cast(T, result)

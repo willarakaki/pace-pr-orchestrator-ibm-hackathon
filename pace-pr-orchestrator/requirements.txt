@@ -1,6 +1,8 @@
 agentops
 aiohttp
 langgraph
+langchain-ibm
+ibm-watsonx-ai
 presidio-analyzer
 presidio-anonymizer
 tenacity
