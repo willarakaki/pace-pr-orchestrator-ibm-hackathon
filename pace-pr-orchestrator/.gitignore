@@ -1,0 +1,25 @@
+# Local secrets and environment files; keep the documented template.
+.env
+.env.*
+!.env.example
+
+# Python environments and bytecode.
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Test and tooling caches/reports.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build outputs and logs.
+build/
+dist/
+*.egg-info/
+*.log

@@ -1,0 +1,11 @@
+agentops
+aiohttp
+langgraph
+presidio-analyzer
+presidio-anonymizer
+tenacity
+python-dotenv
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.2
+pytest-asyncio>=0.23
+pytest-cov>=5.0
